@@ -1097,23 +1097,40 @@ class Twitch(Plugin):
             return self._get_clips()
         elif self.channel:
             try:
-                # try the proxy method first if configured
-                if self.get_option("proxy-playlist"): 
+                # Store Twitch API response to avoid duplicate calls
+                official_streams = None
+                
+                # First attempt to check if stream is online with Twitch
+                try:
+                    official_streams = self._get_hls_streams_live()
+                    # Stream is online, continue processing
+                except NoStreamsError:
+                    # Stream is offline according to Twitch
+                    log.info(f"Stream {self.channel} is currently offline")
+                    return {}
+
+                if not official_streams:
+                    log.info(f"Stream {self.channel} is currently offline")
+                    return {}
+                    
+                # Stream is confirmed online, try using proxy if configured
+                if self.get_option("proxy-playlist"):
                     try:
                         return self.playlist_proxy.streams(
                             channel=self.channel,
                             disable_ads=self.get_option("disable-ads"),
                             low_latency=self.get_option("low-latency"),
                         )
-                    except NoPlaylistProxyAvailable:
-                        # Fall back to Twitch servers if needed
-                        return self._get_hls_streams_live()
+                    except (NoPlaylistProxyAvailable, NoStreamsError):
+                        # Fallback to the streams we already got from Twitch
+                        log.info("Using Twitch servers as fallback")
+                        return official_streams
                 else:
-                    # Direct Twitch access if no proxies configured
-                    return self._get_hls_streams_live()
-            except NoStreamsError:
-                # Return empty dict when stream is offline (works with retry-streams)
-                log.info(f"Stream {self.channel} is currently offline")
+                    # No proxy configured, use Twtich streams
+                    return official_streams
+                    
+            except Exception as e:
+                log.error(f"Unexpected error: {e}")
                 return {}
 
 
