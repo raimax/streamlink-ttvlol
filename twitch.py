@@ -58,7 +58,7 @@ from streamlink.utils.url import update_qsd
 log = logging.getLogger(__name__)
 
 LOW_LATENCY_MAX_LIVE_EDGE = 2
-STREAMLINK_TTVLOL_VERSION = "98991c15-master"
+STREAMLINK_TTVLOL_VERSION = "7.0.0-20241105"
 
 
 @dataclass
@@ -335,6 +335,7 @@ class PlaylistProxyService:
             "referer": "https://player.twitch.tv",
             "origin": "https://player.twitch.tv",
         })
+        
         for proxy in self.playlist_proxies:
             url = re.sub(r"\[channel\]", channel, proxy)
             parsed_url = urlparse(url)
@@ -348,6 +349,11 @@ class PlaylistProxyService:
             try:
                 return TwitchHLSStream.parse_variant_playlist(self.session, url, **kwargs)
             except OSError as err:
+                # Check if this is a 404/offline stream error
+                orig = getattr(err, "err", None)
+                if isinstance(orig, HTTPError) and orig.response.status_code == 404:
+                    log.info(f"Stream {channel} appears to be offline (404 from proxy)")
+                    raise NoStreamsError
                 log.error(err)
 
         if self.fallback:
@@ -1015,10 +1021,14 @@ class Twitch(Plugin):
             "referer": "https://player.twitch.tv",
             "origin": "https://player.twitch.tv",
         })
-        sig, token, restricted_bitrates = self._access_token(True, self.channel)
-        url = self.usher.channel(self.channel, sig=sig, token=token, fast_bread=True)
-
-        return self._get_hls_streams(url, restricted_bitrates)
+        
+        try:
+            sig, token, restricted_bitrates = self._access_token(True, self.channel)
+            url = self.usher.channel(self.channel, sig=sig, token=token, fast_bread=True)
+            return self._get_hls_streams(url, restricted_bitrates)
+        except NoStreamsError:
+            log.info(f"Stream {self.channel} is currently offline")
+            return {}  # Return empty dict to support retry-streams
 
     def _get_hls_streams_video(self):
         log.debug(f"Getting HLS streams for video ID {self.video_id}")
@@ -1087,13 +1097,24 @@ class Twitch(Plugin):
             return self._get_clips()
         elif self.channel:
             try:
-                return self.playlist_proxy.streams(
-                    channel=self.channel,
-                    disable_ads=self.get_option("disable-ads"),
-                    low_latency=self.get_option("low-latency"),
-                )
-            except NoPlaylistProxyAvailable:
-                return self._get_hls_streams_live()
+                # try the proxy method first if configured
+                if self.get_option("proxy-playlist"): 
+                    try:
+                        return self.playlist_proxy.streams(
+                            channel=self.channel,
+                            disable_ads=self.get_option("disable-ads"),
+                            low_latency=self.get_option("low-latency"),
+                        )
+                    except NoPlaylistProxyAvailable:
+                        # Fall back to Twitch servers if needed
+                        return self._get_hls_streams_live()
+                else:
+                    # Direct Twitch access if no proxies configured
+                    return self._get_hls_streams_live()
+            except NoStreamsError:
+                # Return empty dict when stream is offline (works with retry-streams)
+                log.info(f"Stream {self.channel} is currently offline")
+                return {}
 
 
 __plugin__ = Twitch
